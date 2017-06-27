@@ -808,6 +808,11 @@ void jl_gc_force_mark_old(jl_ptls_t ptls, jl_value_t *v) JL_NOTSAFEPOINT
     else if (dt == jl_task_type) {
         dtsz = sizeof(jl_task_t);
     }
+#ifdef JULIA_ENABLE_PARTR
+    else if (dt == jl_condition_type) {
+        dtsz = sizeof(jl_condition_t);
+    }
+#endif
     else if (dt == jl_symbol_type) {
         return;
     }
@@ -2303,7 +2308,11 @@ mark: {
             jl_task_t *ta = (jl_task_t*)new_obj;
             gc_scrub_record_task(ta);
             void *stkbuf = ta->stkbuf;
+#ifdef JULIA_ENABLE_PARTR
+            int16_t tid = ta->current_tid;
+#else
             int16_t tid = ta->tid;
+#endif
             jl_ptls_t ptls2 = jl_all_tls_states[tid];
             if (gc_cblist_task_scanner) {
                 export_gc_state(ptls, &sp);

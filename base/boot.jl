@@ -128,6 +128,17 @@
 #    name::Symbol
 #end
 
+#if JULIA_PARTR
+#mutable struct Task
+#    storage::Any
+#    state::Symbol
+#    result::Any
+#    exception::Any
+#    backtrace::Any
+#    logstate::Any
+#    code::Any
+#end
+#else
 #mutable struct Task
 #    parent::Task
 #    storage::Any
@@ -139,6 +150,7 @@
 #    logstate::Any
 #    code::Any
 #end
+#end
 
 export
     # key types
@@ -148,6 +160,7 @@ export
     # special objects
     Function, Method,
     Module, Symbol, Task, Array, UndefInitializer, undef, WeakRef, VecElement,
+    Condition,
     # numeric types
     Number, Real, Integer, Bool, Ref, Ptr,
     AbstractFloat, Float16, Float32, Float64,
