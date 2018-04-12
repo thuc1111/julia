@@ -67,6 +67,8 @@ extern size_t jl_page_size;
 jl_datatype_t *jl_task_type;
 #ifdef JULIA_ENABLE_PARTR
 jl_datatype_t *jl_condition_type;
+
+void NOINLINE JL_NORETURN task_wrapper(void);
 #endif
 
 static char *jl_alloc_fiber(jl_ucontext_t *t, size_t *ssize, jl_task_t *owner);
@@ -480,10 +482,14 @@ static void rebase_state(jl_jmp_buf *ctx, intptr_t local_sp, intptr_t new_sp)
 #endif
 }
 
-void init_task_entry(void (*task_entry)(void), jl_task_t *t, char *stack)
+void init_task_entry(jl_task_t *t, char *stack)
 {
     if (jl_setjmp(t->ctx, 0)) {
-        (*task_entry)();
+#ifdef JULIA_ENABLE_PARTR
+        task_wrapper();
+#else
+        start_task();
+#endif
     }
     // this runs when the task is created
     intptr_t local_sp = (intptr_t)&t;
@@ -561,6 +567,10 @@ JL_DLLEXPORT void jl_rethrow_other(jl_value_t *e)
 }
 
 #ifndef JULIA_ENABLE_PARTR
+JL_DLLEXPORT jl_task_t *jl_task_new(jl_function_t *start) {
+    return jl_new_task(start, 0);
+}
+
 JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
@@ -614,7 +624,7 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
         jl_errorf("mprotect: %s", strerror(errno));
     stk += pagesz;
 
-    init_task_entry(start_task, t, stk);
+    init_task_entry(t, stk);
     jl_gc_add_finalizer((jl_value_t*)t, jl_unprotect_stack_func);
     JL_GC_POP();
 #endif
@@ -704,12 +714,12 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type,
-                                jl_any_type,
-                                jl_any_type,
+                                jl_int64_type,
+                                jl_int32_type,
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type),
-                        0, 1, 12);
+                        0, 1, 14);
     jl_svecset(jl_task_type->types, 7, (jl_value_t*)jl_method_instance_type);
     jl_svecset(jl_task_type->types, 9, (jl_value_t*)jl_method_instance_type);
     jl_svecset(jl_task_type->types, 10, (jl_value_t*)jl_task_type);
@@ -717,10 +727,9 @@ void jl_init_tasks(void) JL_GC_DISABLED
     jl_svecset(jl_task_type->types, 14, (jl_value_t*)jl_task_type);
     jl_condition_type = (jl_datatype_t*)
         jl_new_datatype(jl_symbol("Condition"), NULL, jl_any_type, jl_emptysvec,
-                        jl_perm_symsvec(4, "notify", "waitq_head", "waitq_lock_owner", "waitq_lock_count"),
-                        jl_svec(4, jl_uint8_type, jl_any_type, jl_int64_type, jl_int32_type),
-                        0, 1, 4);
-    jl_svecset(jl_condition_type->types, 1, (jl_value_t*)jl_task_type);
+                        jl_perm_symsvec(3, "head", "lock_owner", "lock_count"),
+                        jl_svec(3, jl_task_type, jl_int64_type, jl_int32_type),
+                        0, 1, 2);
 #endif /* JULIA_ENABLE_PARTR */
 
     done_sym = jl_symbol("done");
@@ -1066,16 +1075,24 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->stkbuf = stack;
     ptls->current_task->bufsz = ssize;
 #ifdef JULIA_ENABLE_PARTR
-    ptls->current_task->settings = TASK_IS_STICKY | TASK_IS_DETACHED;
-    ptls->current_task->next = NULL;
     ptls->current_task->storage = jl_nothing;
+    ptls->current_task->args = jl_nothing;
+    ptls->current_task->mfunc = NULL;
+    ptls->current_task->rargs = jl_nothing;
+    ptls->current_task->mredfunc = NULL;
+    ptls->current_task->cq.head = NULL;
+    JL_MUTEX_INIT(&ptls->current_task->cq.lock);
+    ptls->current_task->next = NULL;
+    ptls->current_task->parent = ptls->current_task;
+    ptls->current_task->red_result = jl_nothing;
     ptls->current_task->current_tid = ptls->tid;
-    ptls->current_task->sticky_tid = ptls->tid;
-    ptls->current_task->parent = NULL;
     ptls->current_task->arr = NULL;
     ptls->current_task->red = NULL;
-    ptls->current_task->red_result = jl_nothing;
+    ptls->current_task->settings = TASK_IS_STICKY | TASK_IS_DETACHED;
+    ptls->current_task->sticky_tid = ptls->tid;
     ptls->current_task->grain_num = -1;
+    ptls->current_task->fptr = NULL;
+    ptls->current_task->rfptr = NULL;
 #else
     ptls->current_task->tls = jl_nothing;
     ptls->current_task->start = NULL;
@@ -1083,16 +1100,16 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->parent = ptls->current_task;
     ptls->current_task->donenotify = jl_nothing;
 #endif
-    ptls->current_task->result = jl_nothing;
     ptls->current_task->state = runnable_sym;
-    ptls->current_task->started = 1;
+    ptls->current_task->result = jl_nothing;
     ptls->current_task->exception = jl_nothing;
     ptls->current_task->backtrace = jl_nothing;
     ptls->current_task->logstate = jl_nothing;
-    ptls->current_task->eh = NULL;
+    ptls->current_task->started = 1;
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&ptls->current_task->locks, 0);
 #endif
+    ptls->current_task->eh = NULL;
     ptls->current_task->gcstack = NULL;
     ptls->current_task->current_module = ptls->current_module;
 

@@ -1651,10 +1651,12 @@ typedef struct _arriver_t arriver_t;
 typedef struct _reducer_t reducer_t;
 
 typedef struct _jl_taskq_t jl_taskq_t;
-typedef struct _jl_condition_t jl_condition_t;
+typedef struct _jl_taskq_t jl_condition_t;
 typedef struct _jl_task_t jl_task_t;
 
 struct _jl_taskq_t {
+    JL_DATA_TYPE
+
     jl_task_t *head;
     jl_mutex_t lock;
 };
@@ -1748,13 +1750,6 @@ struct _jl_task_t {
 
     jl_timing_block_t *timing_stack;
 };
-
-struct _jl_condition_t {
-    JL_DATA_TYPE
-
-    volatile uint8_t notify;
-    jl_taskq_t waitq;
-};
 #endif // JULIA_ENABLE_THREADING && JULIA_ENABLE_PARTR
 
 #ifdef JULIA_ENABLE_PARTR
@@ -1777,6 +1772,7 @@ JL_DLLEXPORT void JL_NORETURN jl_no_exc_handler(jl_value_t *e);
 #else // JULIA_ENABLE_PARTR
 
 JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize);
+JL_DLLEXPORT jl_task_t *jl_task_new(jl_function_t *start);
 JL_DLLEXPORT void jl_switchto(jl_task_t **pt);
 JL_DLLEXPORT void JL_NORETURN jl_throw(jl_value_t *e JL_MAYBE_UNROOTED);
 JL_DLLEXPORT void JL_NORETURN jl_rethrow(void);
