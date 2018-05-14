@@ -12,8 +12,9 @@ wait(c::Condition) = ccall(:jl_task_wait, Cvoid, (Ref{Condition},), c)
 notify(c::Condition, arg, all, error) = ccall(:jl_task_notify, Cvoid, (Ref{Condition},), c)
 notify(c::Condition, @nospecialize(arg = nothing); all=true, error=false) = notify(c, arg, all, error)
 notify_error(c::Condition, err) = notify(c, err, true, true)
+isempty(c::Condition) = ccall(:jl_condition_isempty, Cint, (Ref{Condition},), c) == 1
 
-schedule(t::Task) = ccall(:jl_task_spawn, Cint, (Ref{Task},Int8,Int8), t, 0, 0)
+schedule(t::Task) = (ccall(:jl_task_spawn, Cint, (Ref{Task},Int8,Int8), t, 0, 0); t)
 fetch(t::Task) = ccall(:jl_task_sync, Any, (Ref{Task},), t)
 yield() = ccall(:jl_task_yield, Cvoid, (Cint,), 1)
 wait() = ccall(:jl_task_yield, Cvoid, (Cint,), 0)

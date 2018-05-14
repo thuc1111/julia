@@ -1665,7 +1665,6 @@ JL_DLLEXPORT void jl_gc_mark_queue_objarray(jl_ptls_t ptls, jl_value_t *parent,
                        &data, sizeof(data), 1);
 }
 
-
 // Check if `nptr` is tagged for `old + refyoung`,
 // Push the object to the remset and update the `nptr` counter if necessary.
 STATIC_INLINE void gc_mark_push_remset(jl_ptls_t ptls, jl_value_t *obj, uintptr_t nptr) JL_NOTSAFEPOINT
@@ -2308,6 +2307,7 @@ mark: {
 #else
             int16_t tid = ta->tid;
 #endif
+<<<<<<< HEAD
             jl_ptls_t ptls2 = jl_all_tls_states[tid];
             if (gc_cblist_task_scanner) {
                 export_gc_state(ptls, &sp);
@@ -2315,8 +2315,13 @@ mark: {
                     gc_cblist_task_scanner, (ta, ta == ptls2->root_task));
                 import_gc_state(ptls, &sp);
             }
+=======
+            jl_ptls_t ptls2 = NULL;
+            if (tid != -1)
+                ptls2 = jl_all_tls_states[tid];
+            if (stkbuf && ta->copy_stack) {
+>>>>>>> eefa7bb0a1097cb58420e5af2c8847d5e2ca7fd7
 #ifdef COPY_STACKS
-            if (stkbuf && ta->copy_stack)
                 gc_setmark_buf_(ptls, stkbuf, bits, ta->bufsz);
 #endif
             jl_gcframe_t *s = NULL;
@@ -2324,7 +2329,7 @@ mark: {
             uintptr_t offset = 0;
             uintptr_t lb = 0;
             uintptr_t ub = (uintptr_t)-1;
-            if (ta == ptls2->current_task) {
+            if (ptls2  &&  ta == ptls2->current_task) {
                 s = ptls2->pgcstack;
             }
             else if (stkbuf) {
@@ -2448,11 +2453,34 @@ static void jl_gc_queue_thread_local(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp
     gc_mark_queue_obj(gc_cache, sp, ptls2->exception_in_transit);
 }
 
+#ifdef JULIA_ENABLE_PARTR
+/*  jl_mark_enqueued_tasks()
+ */
+STATIC_INLINE void gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, gc_mark_sp_t *sp)
+{
+    for (int16_t i = 0;  i < heap_p;  ++i)
+        for (int16_t j = 0;  j < heaps[i].ntasks;  ++j)
+            gc_mark_queue_obj(gc_cache, sp, heaps[i].tasks[j]);
+    for (int16_t i = 0;  i < jl_n_threads;  ++i) {
+        jl_task_t *t = sticky_taskqs[i].head;
+        while (t) {
+            gc_mark_queue_obj(gc_cache, sp, t);
+            t = t->next;
+        }
+    }
+}
+#endif // JULIA_ENABLE_PARTR
+
 // mark the initial root set
 static void mark_roots(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp)
 {
     // modules
     gc_mark_queue_obj(gc_cache, sp, jl_main_module);
+
+#ifdef JULIA_ENABLE_PARTR
+    // tasks
+    gc_mark_enqueued_tasks(gc_cache, sp);
+#endif
 
     // invisible builtin values
     if (jl_an_empty_vec_any != NULL)
