@@ -719,7 +719,7 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type),
-                        0, 1, 14);
+                        0, 1, 9);
     jl_svecset(jl_task_type->types, 7, (jl_value_t*)jl_method_instance_type);
     jl_svecset(jl_task_type->types, 9, (jl_value_t*)jl_method_instance_type);
     jl_svecset(jl_task_type->types, 10, (jl_value_t*)jl_task_type);
@@ -729,7 +729,7 @@ void jl_init_tasks(void) JL_GC_DISABLED
         jl_new_datatype(jl_symbol("Condition"), NULL, jl_any_type, jl_emptysvec,
                         jl_perm_symsvec(3, "head", "lock_owner", "lock_count"),
                         jl_svec(3, jl_task_type, jl_int64_type, jl_int32_type),
-                        0, 1, 2);
+                        0, 1, 0);
 #endif /* JULIA_ENABLE_PARTR */
 
     done_sym = jl_symbol("done");
@@ -1088,8 +1088,11 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->current_tid = ptls->tid;
     ptls->current_task->arr = NULL;
     ptls->current_task->red = NULL;
-    ptls->current_task->settings = TASK_IS_STICKY | TASK_IS_DETACHED;
-    ptls->current_task->sticky_tid = ptls->tid;
+    //TODO: commenting this for debugging
+    //ptls->current_task->settings = TASK_IS_STICKY | TASK_IS_DETACHED;
+    //ptls->current_task->sticky_tid = ptls->tid;
+    ptls->current_task->settings = 0;
+    ptls->current_task->sticky_tid = -1;
     ptls->current_task->grain_num = -1;
     ptls->current_task->fptr = NULL;
     ptls->current_task->rfptr = NULL;
