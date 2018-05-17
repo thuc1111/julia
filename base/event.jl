@@ -5,8 +5,6 @@
 
 if JULIA_PARTR
 
-# Global TODO: arg and error
-
 import Core.Condition
 
 """
@@ -70,7 +68,9 @@ isempty(c::Condition) = ccall(:jl_condition_isempty, Cint, (Ref{Condition},), c)
 Add a [`Task`](@ref) to the scheduler's queue. The task will run when a thread is available
 to execute it.
 """
-schedule(t::Task, @nospecialize(arg = nothing); error=false) = (ccall(:jl_task_spawn, Cint, (Ref{Task},Int8,Int8), t, 0, 0); t)
+schedule(t::Task, @nospecialize(arg = nothing); error=false, unyielding=false) =
+    ccall(:jl_task_spawn, Ref{Task}, (Ref{Task},Any,Int8,Int8,Int8,Int8),
+          t, arg, error, unyielding, 0, 0)
 
 """
     fetch(t::Task)
@@ -86,9 +86,9 @@ Allow the scheduler to use the thread running the current task to run a higher p
 if one exists in the scheduler's queue. The current task will be re-queued.
 """
 yield() = ccall(:jl_task_yield, Any, (Cint,), 1)
-yield(t::Task, @nospecialize x = nothing) = yield() # TODO: cannot yieldto anymore
-yieldto(t::Task, @nospecialize x = nothing) = yield() # TODO: cannot yieldto anymore
-try_yieldto(undo, reftask::Ref{Task}) = yield() # TODO: cannot yieldto anymore
+yield(t::Task, @nospecialize x = nothing) = (schedule(t, x); yield())
+yieldto(t::Task, @nospecialize x = nothing) = yield(t, x)
+try_yieldto(undo, reftask::Ref{Task}) = yield(t, x)
 
 """
     wait()
@@ -109,7 +109,7 @@ macro schedule(expr)
 end
 function schedule_and_wait(t::Task, arg=nothing)
     schedule(t, arg)
-    fetch(t)
+    wait()
 end
 
 throwto(t::Task, @nospecialize exc) = () # TODO: should throwto() still work? what if the task is running in another thread?
@@ -439,7 +439,7 @@ function AsyncCondition(cb::Function)
     end)
     # must start the task right away so that it can wait for the AsyncCondition before
     # we re-enter the event loop. this avoids a race condition. see issue #12719
-    yield(waiter)
+    schedule(waiter)
     return async
 end
 
@@ -594,6 +594,6 @@ function Timer(cb::Function, timeout::Real; interval::Real = 0.0)
     end)
     # must start the task right away so that it can wait for the Timer before
     # we re-enter the event loop. this avoids a race condition. see issue #12719
-    yield(waiter)
+    schedule(waiter)
     return t
 end

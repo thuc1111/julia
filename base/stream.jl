@@ -900,13 +900,35 @@ function write(s::LibuvStream, b::UInt8)
     return write(s, Ref{UInt8}(b))
 end
 
+if JULIA_PARTR
+
 function uv_writecb_task(req::Ptr{Cvoid}, status::Cint)
     d = uv_req_data(req)
     if d != C_NULL
         uv_req_set_data(req, C_NULL) # let the Task know we got the writecb
         t = unsafe_pointer_to_objref(d)::Task
         if status < 0
-            err = _UVError("write", status)
+            err = UVError("write", status)
+            schedule(t, err, error=true, unyielding=true)
+        else
+            schedule(t, unyielding=true)
+        end
+    else
+        # no owner for this req, safe to just free it
+        Libc.free(req)
+    end
+    nothing
+end
+
+else # !JULIA_PARTR
+
+function uv_writecb_task(req::Ptr{Cvoid}, status::Cint)
+    d = uv_req_data(req)
+    if d != C_NULL
+        uv_req_set_data(req, C_NULL) # let the Task know we got the writecb
+        t = unsafe_pointer_to_objref(d)::Task
+        if status < 0
+            err = UVError("write", status)
             schedule(t, err, error=true)
         else
             schedule(t)
@@ -917,6 +939,8 @@ function uv_writecb_task(req::Ptr{Cvoid}, status::Cint)
     end
     nothing
 end
+
+end # JULIA_PARTR
 
 _fd(x::IOStream) = RawFD(fd(x))
 
