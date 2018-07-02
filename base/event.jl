@@ -82,13 +82,14 @@ fetch(t::Task) = ccall(:jl_task_sync, Any, (Ref{Task},), t)
 """
     yield()
 
-Allow the scheduler to use the thread running the current task to run a higher priority task,
-if one exists in the scheduler's queue. The current task will be re-queued.
+Allow the scheduler to use the thread running the current task to run a higher
+priority task (i.e. earlier in the depth-first graph), if one exists in the
+scheduler's queue. The current task will be re-queued.
 """
 yield() = ccall(:jl_task_yield, Any, (Cint,), 1)
 yield(t::Task, @nospecialize x = nothing) = (schedule(t, x); yield())
 yieldto(t::Task, @nospecialize x = nothing) = yield(t, x)
-try_yieldto(undo, reftask::Ref{Task}) = yield(t, x)
+try_yieldto(undo, reftask::Ref{Task}) = (schedule(reftask[]); yield())
 
 """
     wait()
@@ -113,6 +114,7 @@ function schedule_and_wait(t::Task, arg=nothing)
 end
 
 throwto(t::Task, @nospecialize exc) = () # TODO: should throwto() still work? what if the task is running in another thread?
+
 
 else # !JULIA_PARTR
 
@@ -439,7 +441,7 @@ function AsyncCondition(cb::Function)
     end)
     # must start the task right away so that it can wait for the AsyncCondition before
     # we re-enter the event loop. this avoids a race condition. see issue #12719
-    schedule(waiter)
+    yield(waiter)
     return async
 end
 
@@ -594,6 +596,6 @@ function Timer(cb::Function, timeout::Real; interval::Real = 0.0)
     end)
     # must start the task right away so that it can wait for the Timer before
     # we re-enter the event loop. this avoids a race condition. see issue #12719
-    schedule(waiter)
+    yield(waiter)
     return t
 end
