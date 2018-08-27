@@ -17,6 +17,9 @@ extern "C" {
 #ifdef JULIA_ENABLE_THREADING
 #ifdef JULIA_ENABLE_PARTR
 
+#ifdef JULIA_VALGRIND
+#include <valgrind/valgrind.h>
+#endif
 #include <sys/mman.h> // for mprotect
 
 // task states
@@ -441,7 +444,11 @@ void jl_threadfun(void *arg)
     free(targ);
 
     // set a jump context for this root task
-    jl_setjmp(ptls->current_task->ctx, 0);
+    if(jl_setjmp(ptls->current_task->ctx, 0)) {
+#ifdef JL_ASAN_ENABLED
+       __sanitizer_finish_switch_fiber(ptls->current_task->fakestack, NULL, NULL);
+#endif
+    }
 
     /* get the highest priority task and run it */
     run_next();
@@ -679,6 +686,11 @@ static void JL_NORETURN run_next(void)
     ptls->current_task = task;
     task->current_tid = ptls->tid;
 
+#ifdef JL_ASAN_ENABLED
+    size_t ssize = task->ssize;
+    void *bottom = (void*) (((char*) task->stkbuf) + ssize);
+    __sanitizer_start_switch_fiber(&task->fakestack, bottom, ssize);
+#endif
     jl_longjmp(task->ctx, 1);
 
     /* unreachable */
@@ -754,9 +766,13 @@ static void init_task(jl_task_t *task, jl_value_t *_args)
     jl_gc_wb(task, task->mfunc);
 
     // TODO: need stack management
-    task->ssize = 128*1024;
+    // TODO: need stack protection page see task.c
+    task->ssize = 65536*1024;
     task->stkbuf = (void *)jl_gc_alloc_buf(ptls, task->ssize);
     jl_gc_wb_buf(task, task->stkbuf, task->ssize);
+#ifdef JULIA_VALGRIND
+    VALGRIND_STACK_REGISTER(task->stkbuf, task->stkbuf + task->ssize);
+#endif
 
     // set up entry point for this task
     init_task_entry(task, (char *)task->stkbuf);
@@ -1005,37 +1021,43 @@ JL_DLLEXPORT jl_value_t *jl_task_yield(int requeue)
         jl_timing_block_stop(blk);
 #endif
 
-    if (ytask  &&  !jl_setjmp(ytask->ctx, 0)) {
-        if (ytask != ptls->root_task)
-            ytask->current_tid = -1;
-        //ptls->current_task = NULL;
+    if (ytask) {
+	if (!jl_setjmp(ytask->ctx, 0)) {
+            if (ytask != ptls->root_task)
+                ytask->current_tid = -1;
+            //ptls->current_task = NULL;
 
-        // backtraces don't survive task switches, see issue #12485
-        ptls->bt_size = 0;
+            // backtraces don't survive task switches, see issue #12485
+            ptls->bt_size = 0;
 
-        // save state into yielding task
-        ytask->gcstack = ptls->pgcstack;
-        ytask->world_age = ptls->world_age;
+            // save state into yielding task
+            ytask->gcstack = ptls->pgcstack;
+            ytask->world_age = ptls->world_age;
 
-        // If the current task is not holding any locks, free the locks list
-        // so that it can be GC'd without leaking memory.
-        // TODO: this will be too slow!
-        arraylist_t *locks = &ytask->locks;
-        if (locks->len == 0  &&  locks->items != locks->_space) {
-            arraylist_free(locks);
-            arraylist_new(locks, 0);
+            // If the current task is not holding any locks, free the locks list
+            // so that it can be GC'd without leaking memory.
+            // TODO: this will be too slow!
+            arraylist_t *locks = &ytask->locks;
+            if (locks->len == 0  &&  locks->items != locks->_space) {
+                arraylist_free(locks);
+                arraylist_new(locks, 0);
+            }
+
+            // re-enqueue the task
+            if (requeue)
+                enqueue_task(ytask);
+
+            // run the next available task
+            run_next();
+
+            // unreachable
+            gc_debug_critical_error();
+            abort();
+	} else {
+#ifdef JL_ASAN_ENABLED
+           __sanitizer_finish_switch_fiber(ptls->current_task->fakestack, NULL, NULL);
+#endif
         }
-
-        // re-enqueue the task
-        if (requeue)
-            enqueue_task(ytask);
-
-        // run the next available task
-        run_next();
-
-        // unreachable
-        gc_debug_critical_error();
-        abort();
     }
 
     // TODO: add support for allowing any thread to run the event loop
