@@ -530,7 +530,7 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 #ifdef COPY_STACKS
     if (t->copy_stack)
         memcpy(&t->ctx, &ptls->base_ctx, sizeof(t->ctx));
-    init_task_entry(t, stk);
+    // TODO kp: init_task_entry(t, stk);
 #endif
 
     return t;
@@ -625,39 +625,6 @@ void jl_init_tasks(void) JL_GC_DISABLED
     failed_sym = jl_symbol("failed");
     runnable_sym = jl_symbol("runnable");
 }
-
-static void NOINLINE JL_NORETURN start_task(void)
-{
-    // this runs the first time we switch to a task
-    jl_ptls_t ptls = jl_get_ptls_states();
-    jl_task_t *t = ptls->current_task;
-    jl_value_t *res;
-    t->started = 1;
-    if (t->exception != jl_nothing) {
-        record_backtrace();
-        res = t->exception;
-    }
-    else {
-        JL_TRY {
-            if (ptls->defer_signal) {
-                ptls->defer_signal = 0;
-                jl_sigint_safepoint(ptls);
-            }
-            JL_TIMING(ROOT);
-            ptls->world_age = jl_world_counter;
-            res = jl_apply(&t->start, 1);
-        }
-        JL_CATCH {
-            res = jl_exception_in_transit;
-            t->exception = res;
-            jl_gc_wb(t, res);
-        }
-    }
-    finish_task(t, res);
-    gc_debug_critical_error();
-    abort();
-}
-
 
 #if defined(JL_HAVE_UCONTEXT)
 #ifdef _OS_WINDOWS_
@@ -963,6 +930,7 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
 #endif
     ptls->current_task->stkbuf = stack;
     ptls->current_task->bufsz = ssize;
+    ptls->current_task->started = 1;
 #ifdef JULIA_ENABLE_PARTR
     ptls->current_task->storage = jl_nothing;
     ptls->current_task->args = jl_nothing;
@@ -977,7 +945,7 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->current_tid = ptls->tid;
     ptls->current_task->arr = NULL;
     ptls->current_task->red = NULL;
-    //TODO: commenting this for debugging
+    //TODO kp: commenting this for debugging
     //ptls->current_task->settings = TASK_IS_STICKY | TASK_IS_DETACHED;
     //ptls->current_task->sticky_tid = ptls->tid;
     ptls->current_task->settings = 0;
@@ -989,7 +957,6 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->tls = jl_nothing;
     ptls->current_task->start = NULL;
     ptls->current_task->tid = ptls->tid;
-    ptls->current_task->parent = ptls->current_task;
     ptls->current_task->donenotify = jl_nothing;
 #endif
     ptls->current_task->state = runnable_sym;
@@ -997,13 +964,11 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     ptls->current_task->exception = jl_nothing;
     ptls->current_task->backtrace = jl_nothing;
     ptls->current_task->logstate = jl_nothing;
-    ptls->current_task->started = 1;
+    ptls->current_task->eh = NULL;
+    ptls->current_task->gcstack = NULL;
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&ptls->current_task->locks, 0);
 #endif
-    ptls->current_task->eh = NULL;
-    ptls->current_task->gcstack = NULL;
-    ptls->current_task->current_module = ptls->current_module;
 
     ptls->exception_in_transit = (jl_value_t*)jl_nothing;
     ptls->root_task = ptls->current_task;

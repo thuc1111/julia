@@ -1665,6 +1665,7 @@ JL_DLLEXPORT void jl_gc_mark_queue_objarray(jl_ptls_t ptls, jl_value_t *parent,
                        &data, sizeof(data), 1);
 }
 
+
 // Check if `nptr` is tagged for `old + refyoung`,
 // Push the object to the remset and update the `nptr` counter if necessary.
 STATIC_INLINE void gc_mark_push_remset(jl_ptls_t ptls, jl_value_t *obj, uintptr_t nptr) JL_NOTSAFEPOINT
@@ -2317,6 +2318,7 @@ mark: {
                 import_gc_state(ptls, &sp);
             }
 #ifdef COPY_STACKS
+            if (stkbuf && ta->copy_stack)
                 gc_setmark_buf_(ptls, stkbuf, bits, ta->bufsz);
 #endif
             jl_gcframe_t *s = NULL;
