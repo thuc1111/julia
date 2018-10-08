@@ -253,19 +253,6 @@ end
 =#
 end
 
-@testset "schedule_and_wait" begin
-    t = @async(nothing)
-    ct = current_task()
-    testobject = "testobject"
-    # note: there is a low probability this test could fail, due to receiving network traffic simultaneously
-    # TODO: there's no Workqueue any more
-    #@test length(Base.Workqueue) == 1
-    @test Base.schedule_and_wait(ct, 8) == 8
-    # TODO: there's no Workqueue any more
-    #@test isempty(Base.Workqueue)
-    @test Base.schedule_and_wait(ct, testobject) === testobject
-end
-
 @testset "throwto" begin
     t = @task(nothing)
     ct = current_task()
