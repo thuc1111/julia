@@ -200,12 +200,6 @@ function wait(t::Task)
     end
 end
 
-"""
-    fetch(t::Task)
-
-Wait for a Task to finish, then return its result value. If the task fails with an
-exception, the exception is propagated (re-thrown in the task that called fetch).
-"""
 function fetch(t::Task)
     wait(t)
     task_result(t)
