@@ -224,10 +224,10 @@ static void record_backtrace(void) JL_NOTSAFEPOINT
     ptls->bt_size = rec_backtrace(ptls->bt_data, JL_MAX_BT_SIZE);
 }
 
-static void NOINLINE JL_NORETURN JL_USED_FUNC start_task(void)
+static void NOINLINE JL_NORETURN start_task(void)
 {
-    jl_ptls_t ptls = jl_get_ptls_states();
     // this runs the first time we switch to a task
+    jl_ptls_t ptls = jl_get_ptls_states();
     jl_task_t *t = ptls->current_task;
     jl_value_t *res;
     t->started = 1;
@@ -246,7 +246,7 @@ static void NOINLINE JL_NORETURN JL_USED_FUNC start_task(void)
             res = jl_apply(&t->start, 1);
         }
         JL_CATCH {
-            res = ptls->exception_in_transit;
+            res = jl_exception_in_transit;
             t->exception = res;
             jl_gc_wb(t, res);
         }
@@ -256,19 +256,6 @@ static void NOINLINE JL_NORETURN JL_USED_FUNC start_task(void)
     abort();
 }
 #endif // ! JULIA_ENABLE_PARTR
-
-#ifdef COPY_STACKS
-void NOINLINE jl_set_base_ctx(char *__stk)
-{
-    jl_ptls_t ptls = jl_get_ptls_states();
-    ptls->stackbase = (char*)(((uintptr_t)__stk + sizeof(*__stk))&-16); // also ensures stackbase is 16-byte aligned
-#ifndef ASM_COPY_STACKS
-    if (jl_setjmp(ptls->base_ctx, 0)) {
-        start_task();
-    }
-#endif
-}
-#endif
 
 JL_DLLEXPORT void julia_init(JL_IMAGE_SEARCH rel)
 {
@@ -404,84 +391,6 @@ JL_DLLEXPORT void jl_switchto(jl_task_t **pt)
 #endif // !JULIA_ENABLE_PARTR
 
 #ifndef COPY_STACKS
-
-#ifdef __linux__
-#if defined(__i386__)
-static intptr_t ptr_mangle(intptr_t p)
-{
-    intptr_t ret;
-    asm(" movl %1, %%eax;\n"
-        " xorl %%gs:0x18, %%eax;"
-        " roll $9, %%eax;"
-        " movl %%eax, %0;"
-        : "=r"(ret) : "r"(p) : "%eax");
-    return ret;
-}
-static intptr_t ptr_demangle(intptr_t p)
-{
-    intptr_t ret;
-    asm(" movl %1, %%eax;\n"
-        " rorl $9, %%eax;"
-        " xorl %%gs:0x18, %%eax;"
-        " movl %%eax, %0;"
-        : "=r"(ret) : "r"(p) : "%eax" );
-    return ret;
-}
-#elif defined(__x86_64__)
-static intptr_t ptr_mangle(intptr_t p)
-{
-    intptr_t ret;
-    asm(" movq %1, %%rax;\n"
-        " xorq %%fs:0x30, %%rax;"
-        " rolq $17, %%rax;"
-        " movq %%rax, %0;"
-        : "=r"(ret) : "r"(p) : "%rax");
-    return ret;
-}
-static intptr_t ptr_demangle(intptr_t p)
-{
-    intptr_t ret;
-    asm(" movq %1, %%rax;\n"
-        " rorq $17, %%rax;"
-        " xorq %%fs:0x30, %%rax;"
-        " movq %%rax, %0;"
-        : "=r"(ret) : "r"(p) : "%rax" );
-    return ret;
-}
-#endif
-#endif //__linux__
-
-/* rebase any values in saved state to the new stack */
-static void rebase_state(jl_jmp_buf *ctx, intptr_t local_sp, intptr_t new_sp)
-{
-    intptr_t *s = (intptr_t*)ctx;
-    intptr_t diff = new_sp - local_sp; /* subtract old base, and add new base */
-#if defined(__linux__) && defined(__i386__)
-    s[3] += diff;
-    if (mangle_pointers)
-        s[4] = ptr_mangle(ptr_demangle(s[4])+diff);
-    else
-        s[4] += diff;
-#elif defined(__linux__) && defined(__x86_64__)
-    if (mangle_pointers) {
-        s[1] = ptr_mangle(ptr_demangle(s[1])+diff);
-        s[6] = ptr_mangle(ptr_demangle(s[6])+diff);
-    }
-    else {
-        s[1] += diff;
-        s[6] += diff;
-    }
-#elif defined(__APPLE__) && defined(__i386__)
-    s[8] += diff;
-    s[9] += diff;
-#elif defined(__APPLE__) && defined(__x86_64__)
-    s[1] += diff;
-    s[2] += diff;
-#else
-#error "COPY_STACKS must be defined on this platform."
-#endif
-}
-
 void init_task_entry(jl_task_t *t, char *stack)
 {
     if (jl_setjmp(t->ctx, 0)) {
@@ -505,7 +414,6 @@ void init_task_entry(jl_task_t *t, char *stack)
     memcpy((void*)new_sp, (void*)local_sp, _frame_offset);
     rebase_state(&t->ctx, local_sp, new_sp);
 }
-
 #endif /* !COPY_STACKS */
 
 jl_timing_block_t *jl_pop_timing_block(jl_timing_block_t *cur_block);
@@ -570,8 +478,8 @@ JL_DLLEXPORT void jl_rethrow_other(jl_value_t *e)
 }
 
 #ifndef JULIA_ENABLE_PARTR
-JL_DLLEXPORT jl_task_t *jl_task_new(jl_function_t *start) {
-    return jl_new_task(start, 0);
+JL_DLLEXPORT jl_task_t *jl_task_new(jl_function_t *start, size_t ssize) {
+    return jl_new_task(start, ssize);
 }
 
 JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
@@ -611,33 +519,9 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 #ifdef ENABLE_TIMINGS
     t->timing_stack = NULL;
 #endif
-
-#ifdef COPY_STACKS
-    t->bufsz = 0;
-#else
-    JL_GC_PUSH1(&t);
-
-    size_t stkbuf_sz = ssize + pagesz + (pagesz - 1);
-    char *stk = (char*)jl_gc_alloc_buf(ptls, stkbuf_sz);
-    t->stkbuf = stk;
-    jl_gc_wb_buf(t, t->stkbuf, stkbuf_sz);
-    stk = (char*)LLT_ALIGN((uintptr_t)stk, pagesz);
-    // add a guard page to detect stack overflow
-    if (mprotect(stk, pagesz-1, PROT_NONE) == -1)
-        jl_errorf("mprotect: %s", strerror(errno));
-    stk += pagesz;
-
-    init_task_entry(t, stk);
-    jl_gc_add_finalizer((jl_value_t*)t, jl_unprotect_stack_func);
-    JL_GC_POP();
-#endif
-
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&t->locks, 0);
 #endif
-    return t;
-}
-#endif // JULIA_ENABLE_PARTR
 
 #if defined(JL_DEBUG_BUILD)
     if (!t->copy_stack)
@@ -646,9 +530,12 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 #ifdef COPY_STACKS
     if (t->copy_stack)
         memcpy(&t->ctx, &ptls->base_ctx, sizeof(t->ctx));
+    init_task_entry(t, stk);
 #endif
+
     return t;
 }
+#endif // !JULIA_ENABLE_PARTR
 
 JL_DLLEXPORT jl_value_t *jl_get_current_task(void)
 {
@@ -684,7 +571,6 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type),
                         0, 1, 8);
-    jl_svecset(jl_task_type->types, 0, (jl_value_t*)jl_task_type);
 #else /* JULIA_ENABLE_PARTR */
     jl_task_type = (jl_datatype_t*)
         jl_new_datatype(jl_symbol("Task"), NULL, jl_any_type, jl_emptysvec,

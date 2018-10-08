@@ -2307,20 +2307,15 @@ mark: {
 #else
             int16_t tid = ta->tid;
 #endif
-<<<<<<< HEAD
-            jl_ptls_t ptls2 = jl_all_tls_states[tid];
+            jl_ptls_t ptls2 = NULL;
+            if (tid != -1)
+                ptls2 = jl_all_tls_states[tid];
             if (gc_cblist_task_scanner) {
                 export_gc_state(ptls, &sp);
                 gc_invoke_callbacks(jl_gc_cb_task_scanner_t,
                     gc_cblist_task_scanner, (ta, ta == ptls2->root_task));
                 import_gc_state(ptls, &sp);
             }
-=======
-            jl_ptls_t ptls2 = NULL;
-            if (tid != -1)
-                ptls2 = jl_all_tls_states[tid];
-            if (stkbuf && ta->copy_stack) {
->>>>>>> eefa7bb0a1097cb58420e5af2c8847d5e2ca7fd7
 #ifdef COPY_STACKS
                 gc_setmark_buf_(ptls, stkbuf, bits, ta->bufsz);
 #endif
@@ -2454,8 +2449,6 @@ static void jl_gc_queue_thread_local(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp
 }
 
 #ifdef JULIA_ENABLE_PARTR
-/*  jl_mark_enqueued_tasks()
- */
 STATIC_INLINE void gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, gc_mark_sp_t *sp)
 {
     for (int16_t i = 0;  i < heap_p;  ++i)
