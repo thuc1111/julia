@@ -22,6 +22,14 @@ extern "C" {
 #endif
 #include <sys/mman.h> // for mprotect
 
+// empirically, finish_task needs about 64k stack space to infer/run
+// and additionally, gc-stack reserves 64k for the guard pages
+#if defined(MINSIGSTKSZ) && MINSIGSTKSZ > 131072
+#define MINSTKSZ MINSIGSTKSZ
+#else
+#define MINSTKSZ 131072
+#endif
+
 // task states
 extern jl_sym_t *done_sym;
 extern jl_sym_t *failed_sym;
@@ -31,7 +39,15 @@ extern jl_sym_t *runnable_sym;
 extern jl_function_t *task_done_hook_func;
 
 // task/stack switch functions used
-extern void init_task_entry(jl_task_t *t, char *stack);
+extern char *jl_alloc_fiber(jl_ucontext_t *t, size_t *ssize, jl_task_t *owner);
+extern void jl_set_fiber(jl_ucontext_t *t);
+extern void jl_start_fiber(jl_ucontext_t *lastt, jl_ucontext_t *t);
+extern void jl_swap_fiber(jl_ucontext_t *lastt, jl_ucontext_t *t);
+extern void jl_release_task_stack(jl_ptls_t ptls, jl_task_t *task);
+
+// GC functions used
+extern int jl_gc_mark_queue_obj_explicit(jl_gc_mark_cache_t *gc_cache,
+                                         jl_gc_mark_sp_t *sp, jl_value_t *obj);
 
 // multiq
 // ---
@@ -328,24 +344,13 @@ static inline int last_arriver(arriver_t *arr, int idx)
 }
 
 
+#if 0
 /*  reduce()
  */
-static inline jl_value_t *reduce(arriver_t *arr, reducer_t *red, jl_callptr_t fptr,
-                                 jl_method_instance_t *mfunc, jl_value_t *_rargs,
+static inline jl_value_t *reduce(arriver_t *arr, reducer_t *red, jl_function_t *redfun,
                                  jl_value_t *val, int idx)
 {
     int arrived, aidx = idx + (GRAIN_K * jl_n_threads) - 1, ridx = aidx, nidx;
-
-    uint32_t nrargs;
-    jl_value_t **rargs;
-    if (!jl_is_svec(_rargs)) {
-        nrargs = 1;
-        rargs = &_rargs;
-    }
-    else {
-        nrargs = jl_svec_len(_rargs);
-        rargs = jl_svec_data(_rargs);
-    }
 
     *red->tree[ridx] = val;
     while (aidx > 0) {
@@ -372,7 +377,7 @@ static inline jl_value_t *reduce(arriver_t *arr, reducer_t *red, jl_callptr_t fp
 
     return val;
 }
-
+#endif
 
 // parallel task runtime
 // ---
@@ -418,7 +423,7 @@ void jl_init_started_threads(jl_threadarg_t **targs)
 }
 
 
-static void run_next(void);
+static int run_next(void);
 
 
 // thread function: used by all except the main thread
@@ -428,30 +433,25 @@ void jl_threadfun(void *arg)
 
     // initialize this thread (set tid, create heap, set up root task)
     jl_init_threadtls(targ->tid);
-    jl_init_stack_limits(0);
+    void *stack_lo, *stack_hi;
+    jl_init_stack_limits(0, &stack_lo, &stack_hi);
     init_started_thread();
-    jl_ptls_t ptls = jl_get_ptls_states();
-    jl_init_root_task(ptls->stack_lo, ptls->stack_hi - ptls->stack_lo);
+    jl_init_root_task(stack_lo, stack_hi);
 
     // Assuming the functions called below don't contain unprotected GC
     // critical region. In general, the following part of this function
     // shouldn't call any managed code without calling `jl_gc_unsafe_enter`
     // first.
+    jl_ptls_t ptls = jl_get_ptls_states();
     jl_gc_state_set(ptls, JL_GC_STATE_SAFE, 0);
     uv_barrier_wait(targ->barrier);
 
     // free the thread argument here
     free(targ);
 
-    // set a jump context for this root task
-    if(jl_setjmp(ptls->current_task->ctx, 0)) {
-#ifdef JL_ASAN_ENABLED
-       __sanitizer_finish_switch_fiber(ptls->current_task->fakestack, NULL, NULL);
-#endif
-    }
-
-    /* get the highest priority task and run it */
-    run_next();
+    /* run loop: get the highest priority task and run it */
+    while (run_next())
+        ;
 }
 
 
@@ -487,6 +487,9 @@ static void sync_grains(jl_task_t *task)
 {
     int was_last = 0;
 
+    /* TODO kp: fix */
+    /* TODO kp: cascade exception(s) if any */
+
     /* reduce... */
     if (task->red) {
         //task->result = reduce(task->arr, task->red, task->rfptr, task->mredfunc,
@@ -495,8 +498,8 @@ static void sync_grains(jl_task_t *task)
 
         /*  if this task is last, set the result in the parent task */
         if (task->result) {
-            task->parent->red_result = task->result;
-            jl_gc_wb(task->parent, task->parent->red_result);
+            task->parent->redresult = task->result;
+            jl_gc_wb(task->parent, task->parent->redresult);
             was_last = 1;
         }
     }
@@ -521,7 +524,7 @@ static void sync_grains(jl_task_t *task)
         /* the parent task needs to wait */
         if (task->grain_num == 0) {
             jl_task_yield(0);
-            task->result = task->red_result;
+            task->result = task->redresult;
             jl_gc_wb(task, task->result);
         }
     }
@@ -529,7 +532,7 @@ static void sync_grains(jl_task_t *task)
 
 
 // all tasks except the root task start and exit here
-void NOINLINE JL_NORETURN task_wrapper(void)
+void NOINLINE JL_NORETURN start_task(void)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
     jl_task_t *task = ptls->current_task;
@@ -544,17 +547,6 @@ void NOINLINE JL_NORETURN task_wrapper(void)
         new_state = failed_sym;
     }
     else {
-        uint32_t nargs;
-        jl_value_t **args;
-        if (!jl_is_svec(task->args)) {
-            nargs = 1;
-            args = &task->args;
-        }
-        else {
-            nargs = jl_svec_len(task->args);
-            args = jl_svec_data(task->args);
-        }
-
         JL_TRY {
             if (ptls->defer_signal) {
                 ptls->defer_signal = 0;
@@ -562,12 +554,12 @@ void NOINLINE JL_NORETURN task_wrapper(void)
             }
             JL_TIMING(ROOT);
             ptls->world_age = jl_world_counter;
-            task->result = task->fptr(task->mfunc, args, nargs);
+            task->result = jl_apply(&task->taskentry, 1);
             jl_gc_wb(task, task->result);
             new_state = done_sym;
         }
         JL_CATCH {
-            task->result = task->exception = ptls->exception_in_transit;
+            task->result = task->exception = jl_exception_in_transit;
             jl_gc_wb(task, task->exception);
             jl_gc_wb(task, task->result);
             new_state = failed_sym;
@@ -605,10 +597,10 @@ void NOINLINE JL_NORETURN task_wrapper(void)
 
     /* run the task-is-done hook(s) */
     if (task_done_hook_func == NULL)
-        task_done_hook_func = (jl_function_t*)jl_get_global(jl_base_module,
-                                                            jl_symbol("task_done_hook"));
+        task_done_hook_func = (jl_function_t *)jl_get_global(jl_base_module,
+                                                             jl_symbol("task_done_hook"));
     if (task_done_hook_func != NULL) {
-        jl_value_t *args[2] = {task_done_hook_func, (jl_value_t*)task};
+        jl_value_t *args[2] = {task_done_hook_func, (jl_value_t *)task};
         JL_TRY {
             jl_apply(args, 2);
         }
@@ -622,17 +614,17 @@ void NOINLINE JL_NORETURN task_wrapper(void)
     /* next task */
     run_next();
 
-    /* unreachable */
+    /* shouldn't reach here */
     gc_debug_critical_error();
     abort();
 }
 
 
 // get the next available task and run it
-static void JL_NORETURN run_next(void)
+static int run_next(void)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
-    jl_task_t *task = NULL;
+    jl_task_t *task = NULL, *lastt = ptls->current_task;
 
     /* TODO: threads should sleep after spinning for some time */
     do {
@@ -672,84 +664,88 @@ static void JL_NORETURN run_next(void)
         }
     } while (!task);
 
-    /* run/resume the task */
+    // may need to allocate the task's stack
+    int started = (task->stkbuf != NULL);
+    if (!started)
+        task->stkbuf = jl_alloc_fiber(&task->ctx, &task->bufsz, task);
+
+    sig_atomic_t defer_signal = ptls->defer_signal;
+    int8_t gc_state = jl_gc_unsafe_enter(ptls);
+
+    int killed = (lastt->state == done_sym || lastt->state == failed_sym);
+    if (killed) {
+        lastt->gcstack = NULL;
+        if (lastt->stkbuf)
+            jl_release_task_stack(ptls, lastt);
+    }
+    else
+        lastt->gcstack = ptls->pgcstack;
+
+    // set up global state for new task
+    lastt->world_age = ptls->world_age;
     ptls->pgcstack = task->gcstack;
     ptls->world_age = task->world_age;
     task->gcstack = NULL;
-
-    jl_task_t *last = task;
-    while (last->current_module == NULL  &&  last != ptls->root_task)
-        last = last->parent;
-    if (last->current_module != NULL)
-        ptls->current_module = last->current_module;
-
     ptls->current_task = task;
     task->current_tid = ptls->tid;
 
-#ifdef JL_ASAN_ENABLED
-    size_t ssize = task->ssize;
-    void *bottom = (void*) (((char*) task->stkbuf) + ssize);
-    __sanitizer_start_switch_fiber(&task->fakestack, bottom, ssize);
-#endif
-    jl_longjmp(task->ctx, 1);
-
-    /* unreachable */
-    gc_debug_critical_error();
-    abort();
-}
-
-
-// specialize and compile the user function
-static void setup_task_fun(jl_value_t *_args,
-                           jl_method_instance_t **mfunc,
-                           jl_callptr_t *fptr)
-{
-    uint32_t nargs;
-    jl_value_t **args;
-    if (!jl_is_svec(_args)) {
-        nargs = 1;
-        args = &_args;
-    }
+    if (!started)
+        jl_start_fiber(&lastt->ctx, &task->ctx);
     else {
-        nargs = jl_svec_len(_args);
-        args = jl_svec_data(_args);
+        if (!killed)
+            jl_set_fiber(&task->ctx);
+        else
+            jl_swap_fiber(&lastt->ctx, &task->ctx);
     }
 
-    size_t world = jl_get_ptls_states()->world_age;
-    *mfunc = jl_lookup_generic(args, nargs,
-                               jl_int32hash_fast(jl_return_address()),
-                               world);
+    // TODO: add support for allowing any thread to run the event loop
+    if (ptls->tid == 0)
+        jl_process_events(jl_global_event_loop());
 
-    // Ignore constant return value for now.
-    *fptr = jl_compile_method_internal(mfunc, world);
+    jl_gc_unsafe_leave(ptls, gc_state);
+    sig_atomic_t other_defer_signal = ptls->defer_signal;
+    if (other_defer_signal  &&  !defer_signal)
+        jl_sigint_safepoint(ptls);
+
+    return 1;
 }
 
 
 // initialize a task
-static void init_task(jl_task_t *task, jl_value_t *_args)
+static void init_task(jl_task_t *task, size_t ssize)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
 
-    task->args = _args;
     task->storage = jl_nothing;
     task->state = runnable_sym;
     task->result = jl_nothing;
     task->exception = jl_nothing;
     task->backtrace = jl_nothing;
     task->logstate = jl_nothing;
-    task->rargs = jl_nothing;
-    task->mredfunc = NULL;
+    task->taskentry = NULL;
+    task->redentry = NULL;
     task->cq.head = NULL;
     JL_MUTEX_INIT(&task->cq.lock);
     task->next = NULL;
     task->parent = ptls->current_task;
-    task->red_result = jl_nothing;
-    task->started = 0;
+    task->redresult = jl_nothing;
+
+    task->copy_stack = 0;
+    if (ssize == 0)
+        task->bufsz = JL_STACK_SIZE;
+    else {
+        if (ssize < MINSTKSZ)
+            ssize = MINSTKSZ;
+        task->bufsz = ssize;
+    }
+#if defined(JL_DEBUG_BUILD)
+    if (!task->copy_stack)
+        memset(&task->ctx, 0, sizeof(task->ctx));
+#endif
+
     arraylist_new(&task->locks, 0);
-    task->rfptr = NULL;
     task->eh = NULL;
     task->gcstack = NULL;
-    task->current_module = NULL;
     task->world_age = ptls->world_age;
     task->current_tid = -1;
     task->arr = NULL;
@@ -757,25 +753,10 @@ static void init_task(jl_task_t *task, jl_value_t *_args)
     task->settings = 0;
     task->sticky_tid = -1;
     task->grain_num = -1;
+
 #ifdef ENABLE_TIMINGS
     task->timing_stack = NULL;
 #endif
-    task->stkbuf = NULL;
-
-    setup_task_fun(_args, &task->mfunc, &task->fptr);
-    jl_gc_wb(task, task->mfunc);
-
-    // TODO: need stack management
-    // TODO: need stack protection page see task.c
-    task->ssize = 65536*1024;
-    task->stkbuf = (void *)jl_gc_alloc_buf(ptls, task->ssize);
-    jl_gc_wb_buf(task, task->stkbuf, task->ssize);
-#ifdef JULIA_VALGRIND
-    VALGRIND_STACK_REGISTER(task->stkbuf, task->stkbuf + task->ssize);
-#endif
-
-    // set up entry point for this task
-    init_task_entry(task, (char *)task->stkbuf);
 }
 
 
@@ -783,16 +764,14 @@ static void init_task(jl_task_t *task, jl_value_t *_args)
 
     The created task can then be spawned.
  */
-JL_DLLEXPORT jl_task_t *jl_task_new(jl_value_t *_args)
+JL_DLLEXPORT jl_task_t *jl_task_new(jl_function_t *_taskentry, size_t ssize)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
 
     jl_task_t *task = (jl_task_t *)jl_gc_alloc(ptls, sizeof (jl_task_t), jl_task_type);
-    JL_GC_PUSH1(&task);
+    init_task(task, ssize);
+    task->taskentry = _taskentry;
 
-    init_task(task, _args);
-
-    JL_GC_POP();
     return task;
 }
 
@@ -845,12 +824,14 @@ JL_DLLEXPORT jl_task_t *jl_task_spawn(jl_task_t *task, jl_value_t *arg, int8_t e
 /*  jl_task_new_multi() -- create multiple tasks for `f(arg)`
 
     Create multiple tasks, each of which invokes `f(arg, start, end)` such
-    that the sum of `end-start` for all tasks is `count`. If `_rargs` is
+    that the sum of `end-start` for all tasks is `count`. If `_redentry` is
     specified, the return values from the tasks are reduced; the result can
     be retrieved by sync'ing on the parent task which is returned. All the
     tasks can be spawned by passing the parent task to `jl_task_spawn_multi()`.
  */
-JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_value_t *_args, int64_t count, jl_value_t *_rargs)
+JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_function_t *_taskentry, size_t ssize,
+                                          int64_t count,
+                                          jl_function_t *_redentry)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
 
@@ -862,32 +843,27 @@ JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_value_t *_args, int64_t count, jl_v
     if (arr == NULL)
         return NULL;
     reducer_t *red = NULL;
-    jl_method_instance_t *mredfunc = NULL;
-    jl_callptr_t rfptr;
-    if (_rargs != NULL) {
+    if (_redentry != NULL) {
         red = reducer_alloc();
         if (red == NULL) {
             arriver_free(arr);
             return NULL;
         }
-        setup_task_fun(_rargs, &mredfunc, &rfptr);
     }
 
     /* allocate (GRAIN_K * nthreads) tasks */
     int64_t start = 0, end = start + each.quot + (each.rem ? 1 : 0);
     jl_task_t *parent = (jl_task_t *)jl_gc_alloc(ptls, sizeof (jl_task_t), jl_task_type);
     JL_GC_PUSH1(&parent);
-    init_task(parent, _args);
+    init_task(parent, ssize);
+    parent->taskentry = _taskentry;
+    parent->redentry = _redentry;
     parent->start = start;
     parent->end = end;
     parent->grain_num = 0;
     parent->arr = arr;
-    if (_rargs != NULL) {
-        parent->rargs = _rargs;
-        parent->mredfunc = mredfunc;
-        parent->rfptr = rfptr;
-        parent->red = red;
-    }
+    parent->red = red;
+
     jl_task_t *prev = parent, *task = NULL;
     start = end;
     for (int64_t i = 1;  i < n;  ++i) {
@@ -896,18 +872,16 @@ JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_value_t *_args, int64_t count, jl_v
         task = (jl_task_t *)jl_gc_alloc(ptls, sizeof (jl_task_t), jl_task_type);
         prev->next = task;
         jl_gc_wb(prev, prev->next);
-        init_task(task, _args);
+        init_task(task, ssize);
+        task->parent = parent;
+        task->taskentry = _taskentry;
+        task->redentry = _redentry;
         task->start = start;
         task->end = end;
-        task->parent = parent;
         task->grain_num = i;
         task->arr = arr;
-        if (_rargs != NULL) {
-            task->rargs = _rargs;
-            task->mredfunc = mredfunc;
-            task->rfptr = rfptr;
-            task->red = red;
-        }
+        task->red = red;
+
         prev = task;
         start = end;
     }
@@ -992,7 +966,7 @@ JL_DLLEXPORT jl_value_t *jl_task_sync(jl_task_t *task)
     if (task->state == failed_sym)
         jl_throw(task->exception);
 
-    return task->grain_num >= 0 && task->red ?  task->red_result : task->result;
+    return task->grain_num >= 0 && task->red ?  task->redresult : task->result;
 }
 
 
@@ -1005,64 +979,49 @@ JL_DLLEXPORT jl_value_t *jl_task_sync(jl_task_t *task)
 JL_DLLEXPORT jl_value_t *jl_task_yield(int requeue)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
-    jl_task_t *ytask = ptls->current_task;
 
     if (ptls->in_finalizer)
         jl_error("task switch not allowed from inside gc finalizer");
     if (ptls->in_pure_callback)
         jl_error("task switch not allowed from inside staged nor pure functions");
 
-    sig_atomic_t defer_signal = ptls->defer_signal;
-    int8_t gc_state = jl_gc_unsafe_enter(ptls);
+#ifdef ENABLE_TIMINGS
+    jl_timing_block_t *blk = NULL;
+#endif
+
+    jl_task_t *ytask = ptls->current_task;
+    if (ytask) {
+        if (ytask != ptls->root_task)
+            ytask->current_tid = -1;
 
 #ifdef ENABLE_TIMINGS
-    jl_timing_block_t *blk = ytask->timing_stack;
-    if (blk)
-        jl_timing_block_stop(blk);
+        blk = ytask->timing_stack;
+        if (blk)
+            jl_timing_block_stop(blk);
 #endif
+        // backtraces don't survive task switches, see issue #12485
+        ptls->bt_size = 0;
 
-    if (ytask) {
-	if (!jl_setjmp(ytask->ctx, 0)) {
-            if (ytask != ptls->root_task)
-                ytask->current_tid = -1;
-            //ptls->current_task = NULL;
-
-            // backtraces don't survive task switches, see issue #12485
-            ptls->bt_size = 0;
-
-            // save state into yielding task
-            ytask->gcstack = ptls->pgcstack;
-            ytask->world_age = ptls->world_age;
-
-            // If the current task is not holding any locks, free the locks list
-            // so that it can be GC'd without leaking memory.
-            // TODO: this will be too slow!
-            arraylist_t *locks = &ytask->locks;
-            if (locks->len == 0  &&  locks->items != locks->_space) {
-                arraylist_free(locks);
-                arraylist_new(locks, 0);
-            }
-
-            // re-enqueue the task
-            if (requeue)
-                enqueue_task(ytask);
-
-            // run the next available task
-            run_next();
-
-            // unreachable
-            gc_debug_critical_error();
-            abort();
-	} else {
-#ifdef JL_ASAN_ENABLED
-           __sanitizer_finish_switch_fiber(ptls->current_task->fakestack, NULL, NULL);
-#endif
+        // If the current task is not holding any locks, free the locks list
+        // so that it can be GC'd without leaking memory.
+        // TODO: this will be too slow!
+        arraylist_t *locks = &ytask->locks;
+        if (locks->len == 0  &&  locks->items != locks->_space) {
+            arraylist_free(locks);
+            arraylist_new(locks, 0);
         }
+
+        // save state into yielding task
+        ytask->gcstack = ptls->pgcstack;
+        ytask->world_age = ptls->world_age;
+
+        // re-enqueue the task
+        if (requeue)
+            enqueue_task(ytask);
     }
 
-    // TODO: add support for allowing any thread to run the event loop
-    if (ptls->tid == 0)
-        jl_process_events(jl_global_event_loop());
+    // run the next available task
+    run_next();
 
 #ifdef ENABLE_TIMINGS
     assert(blk == jl_current_task->timing_stack);
@@ -1070,16 +1029,13 @@ JL_DLLEXPORT jl_value_t *jl_task_yield(int requeue)
         jl_timing_block_start(blk);
 #endif
 
-    jl_gc_unsafe_leave(ptls, gc_state);
-    sig_atomic_t other_defer_signal = ptls->defer_signal;
-    if (other_defer_signal  &&  !defer_signal)
-        jl_sigint_safepoint(ptls);
-
+    // yielding task (eventually) continues
     jl_value_t *exc = ptls->current_task->exception;
     if (exc != jl_nothing) {
         ptls->current_task->exception = jl_nothing;
         jl_throw(exc);
     }
+
     jl_value_t *res = ptls->current_task->result;
     ptls->current_task->result = jl_nothing;
     return res;
@@ -1164,6 +1120,20 @@ JL_DLLEXPORT int jl_condition_isempty(jl_condition_t *c)
     return c->head ? 0 : 1;
 }
 
+
+void jl_gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp)
+{
+    for (int16_t i = 0;  i < heap_p;  ++i)
+        for (int16_t j = 0;  j < heaps[i].ntasks;  ++j)
+            jl_gc_mark_queue_obj_explicit(gc_cache, sp, (jl_value_t *)heaps[i].tasks[j]);
+    for (int16_t i = 0;  i < jl_n_threads;  ++i) {
+        jl_task_t *t = sticky_taskqs[i].head;
+        while (t) {
+            jl_gc_mark_queue_obj_explicit(gc_cache, sp, (jl_value_t *)t);
+            t = t->next;
+        }
+    }
+}
 
 #endif // JULIA_ENABLE_PARTR
 #endif // JULIA_ENABLE_THREADING

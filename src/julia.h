@@ -1676,13 +1676,11 @@ struct _jl_task_t {
     jl_value_t *backtrace;
     jl_value_t *logstate;
 
-    /* task entry point, arguments */
-    jl_value_t *args;
-    jl_method_instance_t *mfunc;
+    /* task entry point */
+    jl_function_t *taskentry;
 
-    /* reduction function entry point, arguments */
-    jl_value_t *rargs;
-    jl_method_instance_t *mredfunc;
+    /* reduction function entry point */
+    jl_function_t *redentry;
 
     /* completion queue */
     jl_taskq_t cq;
@@ -1694,37 +1692,28 @@ struct _jl_task_t {
     jl_task_t *parent;
 
     /* parfor reduction result */
-    jl_value_t *red_result;
+    jl_value_t *redresult;
 
     /* --- hidden --- */
 
     /* context and stack */
-    jl_jmp_buf ctx;
-    size_t ssize;
-    size_t bufsz;
-    void *stkbuf;
+    jl_ucontext_t ctx;          // saved thread state
+    void *stkbuf;               // malloc'd memory (either copybuf or stack)
+    size_t bufsz;               // actual sizeof stkbuf
+    unsigned int copy_stack:31; // sizeof stack for copybuf
+    unsigned int started:1;
+
 //#ifdef JL_ASAN_ENABLED
     void *fakestack;
 //#endif
 
-    size_t started:1;
-
     arraylist_t locks;
-
-    /* task function pointer */
-    jl_callptr_t fptr;
-
-    /* reduction function pointer, for parfors */
-    jl_callptr_t rfptr;
 
     /* current exception handler */
     jl_handler_t *eh;
 
     /* saved gc stack top for context switches */
     jl_gcframe_t *gcstack;
-
-    /* current module, or NULL if this task has not set one */
-    jl_module_t *current_module;
 
     /* current world age */
     size_t world_age;
@@ -1740,7 +1729,7 @@ struct _jl_task_t {
     reducer_t *red;
 
     /* task settings */
-    int8_t  settings;
+    int8_t settings;
 
     /* tid of the thread to which this task is sticky */
     int16_t sticky_tid;
@@ -1757,10 +1746,11 @@ struct _jl_task_t {
 
 #ifdef JULIA_ENABLE_PARTR
 
-JL_DLLEXPORT jl_task_t *jl_task_new(jl_value_t *args);
+JL_DLLEXPORT jl_task_t *jl_task_new(jl_value_t *args, size_t ssize);
 JL_DLLEXPORT jl_task_t *jl_task_spawn(jl_task_t *task, jl_value_t *arg, int8_t err,
                                       int8_t unyielding, int8_t sticky, int8_t detach);
-JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_value_t *args, int64_t count, jl_value_t *rargs);
+JL_DLLEXPORT jl_task_t *jl_task_new_multi(jl_value_t *args, size_t ssize,
+                                          int64_t count, jl_value_t *rargs);
 JL_DLLEXPORT int jl_task_spawn_multi(jl_task_t *task);
 JL_DLLEXPORT jl_value_t *jl_task_sync(jl_task_t *task);
 JL_DLLEXPORT jl_value_t *jl_task_yield(int requeue);

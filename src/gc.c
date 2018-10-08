@@ -1650,6 +1650,13 @@ STATIC_INLINE int gc_mark_queue_obj(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_
     return (int)nptr;
 }
 
+#ifdef JULIA_ENABLE_PARTR
+int jl_gc_mark_queue_obj_explicit(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp, jl_value_t *obj)
+{
+    return gc_mark_queue_obj(gc_cache, sp, obj);
+}
+#endif
+
 JL_DLLEXPORT int jl_gc_mark_queue_obj(jl_ptls_t ptls, jl_value_t *obj)
 {
     return gc_mark_queue_obj(&ptls->gc_cache, &ptls->gc_mark_sp, obj);
@@ -2451,20 +2458,8 @@ static void jl_gc_queue_thread_local(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp
 }
 
 #ifdef JULIA_ENABLE_PARTR
-STATIC_INLINE void gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, gc_mark_sp_t *sp)
-{
-    for (int16_t i = 0;  i < heap_p;  ++i)
-        for (int16_t j = 0;  j < heaps[i].ntasks;  ++j)
-            gc_mark_queue_obj(gc_cache, sp, heaps[i].tasks[j]);
-    for (int16_t i = 0;  i < jl_n_threads;  ++i) {
-        jl_task_t *t = sticky_taskqs[i].head;
-        while (t) {
-            gc_mark_queue_obj(gc_cache, sp, t);
-            t = t->next;
-        }
-    }
-}
-#endif // JULIA_ENABLE_PARTR
+void jl_gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp);
+#endif
 
 // mark the initial root set
 static void mark_roots(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp)
@@ -2474,7 +2469,7 @@ static void mark_roots(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp)
 
 #ifdef JULIA_ENABLE_PARTR
     // tasks
-    gc_mark_enqueued_tasks(gc_cache, sp);
+    jl_gc_mark_enqueued_tasks(gc_cache, sp);
 #endif
 
     // invisible builtin values
