@@ -570,7 +570,7 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type),
-                        0, 1, 8);
+                        0, 1, 7);
 #else /* JULIA_ENABLE_PARTR */
     jl_task_type = (jl_datatype_t*)
         jl_new_datatype(jl_symbol("Task"), NULL, jl_any_type, jl_emptysvec,

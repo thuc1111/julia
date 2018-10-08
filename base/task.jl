@@ -179,8 +179,9 @@ end
 
 if JULIA_PARTR
 
-function _wait(t::Task)
+function wait(t::Task)
     fetch(t)
+    return nothing
 end
 
 else # !JULIA_PARTR
@@ -207,15 +208,13 @@ end
 
 end # !JULIA_PARTR
 
-_wait(not_a_task) = wait(not_a_task)
-
 ## lexically-scoped waiting for multiple items
 
 function sync_end(refs)
     c_ex = CompositeException()
     for r in refs
         try
-            _wait(r)
+            wait(r)
         catch ex
             if !isa(r, Task) || (isa(r, Task) && !istaskfailed(r))
                 rethrow(ex)
