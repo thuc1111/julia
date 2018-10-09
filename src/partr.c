@@ -692,7 +692,7 @@ static int run_next(void)
     if (!started)
         jl_start_fiber(&lastt->ctx, &task->ctx);
     else {
-        if (!killed)
+        if (killed)
             jl_set_fiber(&task->ctx);
         else
             jl_swap_fiber(&lastt->ctx, &task->ctx);
