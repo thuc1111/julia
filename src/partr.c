@@ -727,9 +727,11 @@ static void init_task(jl_task_t *task, size_t ssize)
     task->cq.head = NULL;
     JL_MUTEX_INIT(&task->cq.lock);
     task->next = NULL;
-    task->parent = ptls->current_task;
+    //task->parent = ptls->current_task;
+    task->parent = NULL;
     task->redresult = jl_nothing;
 
+    task->stkbuf = NULL;
     task->copy_stack = 0;
     if (ssize == 0)
         task->bufsz = JL_STACK_SIZE;

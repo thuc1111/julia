@@ -549,22 +549,26 @@ void jl_init_tasks(void) JL_GC_DISABLED
 #else /* JULIA_ENABLE_PARTR */
     jl_task_type = (jl_datatype_t*)
         jl_new_datatype(jl_symbol("Task"), NULL, jl_any_type, jl_emptysvec,
-                        jl_perm_symsvec(12,
+                        jl_perm_symsvec(14,
                                         "storage",
                                         "state",
                                         "result",
                                         "exception",
                                         "backtrace",
                                         "logstate",
+                                        "taskentry",
+                                        "redentry",
                                         "cq_head",
                                         "cq_lock_owner",
                                         "cq_lock_count",
                                         "next",
                                         "parent",
                                         "redresult"),
-                        jl_svec(12,
+                        jl_svec(14,
                                 jl_any_type,
                                 jl_sym_type,
+                                jl_any_type,
+                                jl_any_type,
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type,
@@ -575,10 +579,10 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type),
-                        0, 1, 7);
-    jl_svecset(jl_task_type->types, 6, (jl_value_t*)jl_task_type);
-    jl_svecset(jl_task_type->types, 9, (jl_value_t*)jl_task_type);
-    jl_svecset(jl_task_type->types, 10, (jl_value_t*)jl_task_type);
+                        0, 1, 6);
+    jl_svecset(jl_task_type->types, 8, (jl_value_t*)jl_task_type);
+    jl_svecset(jl_task_type->types, 11, (jl_value_t*)jl_task_type);
+    jl_svecset(jl_task_type->types, 12, (jl_value_t*)jl_task_type);
     jl_condition_type = (jl_datatype_t*)
         jl_new_datatype(jl_symbol("Condition"), NULL, jl_any_type, jl_emptysvec,
                         jl_perm_symsvec(3, "head", "lock_owner", "lock_count"),
